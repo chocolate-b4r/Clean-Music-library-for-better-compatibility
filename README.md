@@ -270,6 +270,99 @@ foreach ($File in $Files) {
 Write-Host "--- Translation Complete ---" -ForegroundColor Cyan
 ```
 
+## Gerne tagging for unknown gerne
+
+using Deezer , iTunes and MusicBrainz
+
+
+```powershell
+# 1. Configuration
+$MusicPath = "C:\Users\ProudCatOwner\Music"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+Write-Host "--- DEFINITIVE MULTI-DATABASE GENRE FETCHING ---" -ForegroundColor Cyan
+Write-Host "Audio: Bit-Perfect Copy | Databases: Deezer, iTunes, MusicBrainz`n"
+
+$Files = Get-ChildItem -Path $MusicPath -Recurse -Include *.flac, *.mp3 -File
+
+foreach ($File in $Files) {
+    # Check if Genre is missing
+    $CurrentGenre = & ffprobe -v error -show_entries format_tags=genre -of default=noprint_wrappers=1:nokey=1 "$($File.FullName)"
+    
+    if (![string]::IsNullOrWhiteSpace($CurrentGenre) -and $CurrentGenre -notmatch "Unknown|None|Genre|Other") {
+        continue # Skip if already tagged
+    }
+
+    # Get Artist and Title
+    $Artist = & ffprobe -v error -show_entries format_tags=artist -of default=noprint_wrappers=1:nokey=1 "$($File.FullName)"
+    $Title = & ffprobe -v error -show_entries format_tags=title -of default=noprint_wrappers=1:nokey=1 "$($File.FullName)"
+
+    if ([string]::IsNullOrWhiteSpace($Artist) -or [string]::IsNullOrWhiteSpace($Title)) {
+        Write-Host "SKIP: Missing Artist/Title tags for $($File.Name)" -ForegroundColor Gray
+        continue
+    }
+
+    # Clean Title for better searching (Remove (Lyrics), [Official], etc)
+    $CleanTitle = $Title -replace "\(.*?\)", "" -replace "\[.*?\]", "" -replace "feat\..*", ""
+    $SearchTerm = "$Artist $CleanTitle".Trim()
+    $NewGenre = $null
+
+    Write-Host "Searching: $SearchTerm... " -NoNewline
+
+    # --- DATABASE 1: DEEZER (Best for General/Remixes) ---
+    try {
+        $Url = "https://api.deezer.com/search?q=" + [uri]::EscapeDataString($SearchTerm)
+        $Resp = Invoke-RestMethod -Uri $Url -TimeoutSec 5
+        if ($Resp.total -gt 0) {
+            $AlbumId = $Resp.data[0].album.id
+            $AlbumResp = Invoke-RestMethod -Uri "https://api.deezer.com/album/$AlbumId"
+            $NewGenre = $AlbumResp.genres.data[0].name
+        }
+    } catch { }
+
+    # --- DATABASE 2: ITUNES (Fallback - Best for Japanese/Pop) ---
+    if ([string]::IsNullOrWhiteSpace($NewGenre)) {
+        try {
+            $Url = "https://itunes.apple.com/search?term=" + [uri]::EscapeDataString($SearchTerm) + "&media=music&limit=1"
+            $Resp = Invoke-RestMethod -Uri $Url -TimeoutSec 5
+            if ($Resp.resultCount -gt 0) { $NewGenre = $Resp.results[0].primaryGenreName }
+        } catch { }
+    }
+
+    # --- DATABASE 3: MUSICBRAINZ (Last Resort - Best for Underground) ---
+    if ([string]::IsNullOrWhiteSpace($NewGenre)) {
+        try {
+            $Query = [uri]::EscapeDataString("artist:""$Artist"" AND recording:""$CleanTitle""")
+            $Url = "https://musicbrainz.org/ws/2/recording/?query=$Query&fmt=json"
+            $Resp = Invoke-RestMethod -Uri $Url -UserAgent "SnowskyManager/1.1" -TimeoutSec 5
+            $NewGenre = $Resp.recordings[0].tags | Sort-Object count -Descending | Select-Object -ExpandProperty name -First 1
+        } catch { }
+    }
+
+    # --- APPLY GENRE IF FOUND ---
+    if (![string]::IsNullOrWhiteSpace($NewGenre)) {
+        Write-Host "FOUND: $NewGenre" -ForegroundColor Green
+        $Temp = $File.FullName + ".tagtmp.flac"
+        
+        # -c copy is MANDATORY: It preserves the 192kHz/24-bit audio exactly.
+        & ffmpeg -i "$($File.FullName)" -c copy -metadata genre="$NewGenre" -map_metadata 0 "$Temp" -y -loglevel error
+        
+        if ($LASTEXITCODE -eq 0) {
+            Move-Item -LiteralPath $Temp -Destination $File.FullName -Force
+        } else {
+            if (Test-Path $Temp) { Remove-Item $Temp }
+        }
+    } else {
+        Write-Host "NOT FOUND" -ForegroundColor Yellow
+    }
+
+    # API Politeness Delay
+    Start-Sleep -Milliseconds 400
+}
+Write-Host "`nProcess Complete!" -ForegroundColor Cyan
+```
+
+
 ---
 
 ## Transfer Your Library with Robocopy
