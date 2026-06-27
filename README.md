@@ -210,32 +210,64 @@ Standardizes genre tags across multiple languages.
 Update the mapping table as needed.
 
 ```powershell
+# 1. FORCE POWERSHELL TO USE UTF-8 FOR EVERYTHING
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+
+$MusicPath = "C:\Users\ProudCatOwner\Music"
+
+# 2. Define the Mapping
 $GenreMap = @{
     "ロック" = "Rock"
+    "ヒップホップ" = "Hip Hop"
     "ワールド" = "World"
-    "Alternatif et indé" = "Alternative"
+    "サウンドトラック" = "Soundtrack"
+    "エレクトロニック" = "Electronic"
+    "Électronique" = "Electronic"
+    "オルタナティヴ" = "Alternative & Indie"
+    "Alternatif" = "Alternative & Indie"
 }
 
-$Files = Get-ChildItem -Path "C:\Users\example\Music" -Recurse -Include *.flac, *.mp3
+Write-Host "--- UTF-8 Forced Translation Started ---" -ForegroundColor Cyan
+
+# Find all music files
+$Files = Get-ChildItem -Path $MusicPath -Recurse -Include *.flac, *.mp3 -File
 
 foreach ($File in $Files) {
-    $Current = & ffprobe -v error `
-        -show_entries format_tags=genre `
-        -of default=noprint_wrappers=1:nokey=1 `
-        "$($File.FullName)"
+    # Get genre using UTF-8 encoding
+    $RawGenre = & ffprobe -v error -show_entries format_tags=genre -of default=noprint_wrappers=1:nokey=1 "$($File.FullName)"
+    
+    if (![string]::IsNullOrWhiteSpace($RawGenre)) {
+        $RawGenre = $RawGenre.Trim()
+        $NewGenre = $null
 
-    if ($GenreMap.ContainsKey($Current.Trim())) {
-        $New = $GenreMap[$Current.Trim()]
-        $Temp = $File.FullName + ".tag.tmp"
+        # Check for matches
+        foreach ($Key in $GenreMap.Keys) {
+            if ($RawGenre -like "*$Key*") {
+                $NewGenre = $GenreMap[$Key]
+                break
+            }
+        }
 
-        & ffmpeg -i "$($File.FullName)" `
-            -c copy `
-            -metadata genre="$New" `
-            "$Temp" -y -loglevel error
-
-        Move-Item -LiteralPath $Temp -Destination $File.FullName -Force
+        if ($null -ne $NewGenre) {
+            Write-Host "Match Found: $($File.Name)" -ForegroundColor Yellow
+            Write-Host "   Tag: $RawGenre -> $NewGenre" -ForegroundColor Gray
+            
+            $Temp = $File.FullName + ".gtmp.flac"
+            
+            # -c copy ensures 192kHz audio is BIT-PERFECT
+            & ffmpeg -i "$($File.FullName)" -c copy -metadata genre="$NewGenre" -map_metadata 0 "$Temp" -y -loglevel error
+            
+            if ($LASTEXITCODE -eq 0) {
+                Move-Item -LiteralPath $Temp -Destination $File.FullName -Force
+                Write-Host "   SUCCESS" -ForegroundColor Green
+            } else {
+                if (Test-Path $Temp) { Remove-Item $Temp }
+            }
+        }
     }
 }
+Write-Host "--- Translation Complete ---" -ForegroundColor Cyan
 ```
 
 ---
