@@ -195,6 +195,31 @@ foreach ($File in $Files) {
 
 ---
 
+## 4k Block Size Standardizer (Hardware Compatibility)
+
+Why this is needed
+High-res FLAC files often use large internal block sizes. Hardware players can fail to play these if a block exceeds their internal buffer. Forcing a 4096 (4k) block size ensures the hardware can digest the data stream without losing quality.
+
+```powershell
+$ParentFolder = "C:\Users\example\Music"
+$Files = Get-ChildItem -Path $ParentFolder -Recurse -Include *.flac -File
+
+foreach ($File in $Files) {
+    Write-Host "Re-blocking: $($File.Name)... " -NoNewline
+    $TempFile = Join-Path $File.DirectoryName ("reblock_" + $File.Name)
+
+    & ffmpeg -i "$($File.FullName)" -map 0:a:0 -map 0:v:0? -c:a flac -block_size 4096 -sample_fmt s32 -c:v copy -disposition:v:0 attached_pic -map_metadata 0 -f flac "$TempFile" -y -loglevel error
+
+    if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $TempFile)) {
+        Remove-Item -LiteralPath $File.FullName -Force
+        Rename-Item -Path $TempFile -NewName $File.Name
+        Write-Host "SUCCESS" -ForegroundColor Green
+    }
+}
+```
+
+---
+
 ## Bonus: Genre Normalization
 
 Standardizes genre tags across multiple languages.
