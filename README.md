@@ -159,77 +159,98 @@ High-res FLAC files often use large internal block sizes. Hardware players can f
 ```powershell
 $ParentFolder = "C:\Users\example\Music"
 
-$FlacExe     = "C:\flac\flac.exe"
-$MetaFlacExe = "C:\flac\metaflac.exe"
+$FFmpeg     = "ffmpeg"
+$FFprobe    = "ffprobe"
+$FlacExe    = "C:\flac\flac.exe"
+$MetaFlac   = "C:\flac\metaflac.exe"
+
+$LogFile = Join-Path $ParentFolder "EchoMini_FLAC_Conversion_Log.csv"
 
 # ------------------------------------------------------------
 # Check required programs
 # ------------------------------------------------------------
 
-if (!(Test-Path -LiteralPath $FlacExe)) {
-    Write-Host "ERROR: flac.exe not found at $FlacExe" -ForegroundColor Red
-    exit 1
-}
-
-if (!(Test-Path -LiteralPath $MetaFlacExe)) {
-    Write-Host "ERROR: metaflac.exe not found at $MetaFlacExe" -ForegroundColor Red
-    exit 1
-}
-
 if (!(Test-Path -LiteralPath $ParentFolder)) {
-    Write-Host "ERROR: Music folder not found: $ParentFolder" -ForegroundColor Red
+    Write-Host "ERROR: Music folder does not exist:" -ForegroundColor Red
+    Write-Host $ParentFolder -ForegroundColor Red
+    exit 1
+}
+
+if (!(Test-Path -LiteralPath $FlacExe)) {
+    Write-Host "ERROR: flac.exe not found:" -ForegroundColor Red
+    Write-Host $FlacExe -ForegroundColor Red
+    exit 1
+}
+
+if (!(Test-Path -LiteralPath $MetaFlac)) {
+    Write-Host "ERROR: metaflac.exe not found:" -ForegroundColor Red
+    Write-Host $MetaFlac -ForegroundColor Red
     exit 1
 }
 
 # ------------------------------------------------------------
-# Find all FLAC files recursively
+# Create log
 # ------------------------------------------------------------
 
-$Files = Get-ChildItem `
-    -Path $ParentFolder `
-    -Recurse `
-    -Filter *.flac `
-    -File
+$Results = New-Object System.Collections.Generic.List[object]
 
-$Total   = $Files.Count
-$Current = 0
-$Success = 0
-$Skipped = 0
-$Failed  = 0
+# ------------------------------------------------------------
+# Find FLAC files
+# ------------------------------------------------------------
+
+$Files = @(
+    Get-ChildItem `
+        -LiteralPath $ParentFolder `
+        -Recurse `
+        -Filter "*.flac" `
+        -File `
+        -ErrorAction SilentlyContinue
+)
+
+$TotalFiles = $Files.Count
 
 Write-Host ""
 Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "FiiO ECHO MINI FLAC Converter" -ForegroundColor Cyan
+Write-Host "ECHO MINI FLAC CONVERTER" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "Library: $ParentFolder"
-Write-Host "Files found: $Total"
+Write-Host "Total FLAC files: $TotalFiles"
 Write-Host "Target maximum block size: 4096"
+Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ""
+
+$Converted = 0
+$Skipped   = 0
+$Failed    = 0
+$Counter   = 0
+
+# ------------------------------------------------------------
+# Process files
+# ------------------------------------------------------------
 
 foreach ($File in $Files) {
 
-    $Current++
+    $Counter++
 
-    Write-Host "[$Current/$Total] $($File.Name)" -ForegroundColor White
+    Write-Host "[$Counter/$TotalFiles] $($File.Name)" -ForegroundColor White
 
-    # Unique temporary file in the same directory
-    $TempFile = Join-Path `
-        $File.DirectoryName `
-        (".__ECHO_MINI_REBLOCK_" + [guid]::NewGuid().ToString() + ".flac")
+    $TempFile = $null
+    $Status   = "FAILED"
+    $Reason   = ""
 
     try {
 
-        # --------------------------------------------------------
-        # 1. Read current block size
-        # --------------------------------------------------------
+        # ----------------------------------------------------
+        # Read current block size
+        # ----------------------------------------------------
 
-        $BlockOutput = & $MetaFlacExe `
+        $BlockOutput = & $MetaFlac `
             --show-min-blocksize `
             --show-max-blocksize `
             "$($File.FullName)" 2>&1
 
         if ($LASTEXITCODE -ne 0) {
-            throw "Could not read FLAC metadata."
+            throw "Could not read FLAC block size."
         }
 
         $BlockValues = @(
@@ -239,70 +260,144 @@ foreach ($File in $Files) {
         )
 
         if ($BlockValues.Count -lt 2) {
-            throw "Could not determine block size."
+            throw "Could not determine FLAC block size."
         }
 
-        $MinBlock = $BlockValues[0]
-        $MaxBlock = $BlockValues[1]
+        $CurrentMinBlock = $BlockValues[0]
+        $CurrentMaxBlock = $BlockValues[1]
 
-        Write-Host "    Current block size: $MinBlock / $MaxBlock"
+        Write-Host "    Current block size: $CurrentMinBlock / $CurrentMaxBlock"
 
-        # --------------------------------------------------------
-        # 2. Skip files already compatible
-        # --------------------------------------------------------
+        # ----------------------------------------------------
+        # Already compatible?
+        # ----------------------------------------------------
 
-        if ($MaxBlock -le 4096) {
-            Write-Host "    Already compatible - SKIPPED" -ForegroundColor Yellow
+        if ($CurrentMaxBlock -le 4096) {
+
+            Write-Host "    SKIPPED - already compatible" `
+                -ForegroundColor DarkGray
+
             $Skipped++
-            Write-Host ""
+
+            $Results.Add([PSCustomObject]@{
+                File   = $File.FullName
+                Status = "SKIPPED"
+                OldMin = $CurrentMinBlock
+                OldMax = $CurrentMaxBlock
+                NewMin = $CurrentMinBlock
+                NewMax = $CurrentMaxBlock
+                Reason = "Already <= 4096"
+            })
+
             continue
         }
 
-        # --------------------------------------------------------
-        # 3. Lossless FLAC re-encode
-        # --------------------------------------------------------
+        Write-Host "    Re-encoding losslessly..." `
+            -ForegroundColor Yellow
 
-        Write-Host "    Re-encoding losslessly..." -ForegroundColor Cyan
+        # ----------------------------------------------------
+        # Temporary filename
+        # ----------------------------------------------------
 
-        & $FlacExe `
-            --force `
-            --blocksize=4096 `
-            --output-name="$TempFile" `
-            "$($File.FullName)" 2>&1 | Out-Null
+        $TempFile = Join-Path `
+            $File.DirectoryName `
+            (".__ECHO_MINI_" + [guid]::NewGuid().ToString() + ".flac")
+
+        # ----------------------------------------------------
+        # Convert using FFmpeg
+        #
+        # -c:a flac          = lossless FLAC encoder
+        # -block_size 4096   = target FLAC block size
+        # -map 0:a:0         = first audio stream
+        # -map 0:v:0?        = optional embedded artwork
+        # -c:v copy          = don't re-encode artwork
+        # -map_metadata 0    = preserve metadata
+        #
+        # FFmpeg determines the actual sample rate,
+        # bit depth and channel layout from the source.
+        # ----------------------------------------------------
+
+        & $FFmpeg `
+            -hide_banner `
+            -loglevel error `
+            -i "$($File.FullName)" `
+            -map 0:a:0 `
+            -map 0:v:0? `
+            -c:a flac `
+            -block_size 4096 `
+            -c:v copy `
+            -disposition:v:0 attached_pic `
+            -map_metadata 0 `
+            -f flac `
+            "$TempFile" `
+            -y
 
         if ($LASTEXITCODE -ne 0) {
-            throw "FLAC conversion failed."
+            throw "FFmpeg conversion failed with exit code $LASTEXITCODE."
         }
+
+        # ----------------------------------------------------
+        # Make sure temporary file exists
+        # ----------------------------------------------------
 
         if (!(Test-Path -LiteralPath $TempFile)) {
-            throw "FLAC encoder did not create an output file."
+            throw "FFmpeg reported success but no output file was created."
         }
 
-        # --------------------------------------------------------
-        # 4. Verify FLAC integrity using the FLAC decoder itself
-        # --------------------------------------------------------
+        $TempSize = (Get-Item -LiteralPath $TempFile).Length
 
-        Write-Host "    Testing FLAC integrity..." -ForegroundColor Cyan
+        if ($TempSize -le 1000) {
+            throw "Converted file is suspiciously small ($TempSize bytes)."
+        }
 
-        & $FlacExe `
-            --test `
-            "$TempFile" 2>&1 | Out-Null
+        # ----------------------------------------------------
+        # Verify codec with FFprobe
+        # ----------------------------------------------------
+
+        $Codec = & $FFprobe `
+            -v error `
+            -select_streams a:0 `
+            -show_entries stream=codec_name `
+            -of default=noprint_wrappers=1:nokey=1 `
+            "$TempFile" 2>&1
+
+        if ($LASTEXITCODE -ne 0) {
+            throw "Converted file could not be read by FFprobe."
+        }
+
+        $Codec = ($Codec | Select-Object -First 1).Trim()
+
+        if ($Codec -ne "flac") {
+            throw "Converted audio stream is not FLAC. Detected: '$Codec'"
+        }
+
+        Write-Host "    Audio codec: FLAC" -ForegroundColor Green
+
+        # ----------------------------------------------------
+        # FLAC integrity test
+        # ----------------------------------------------------
+
+        Write-Host "    Testing FLAC integrity..." -ForegroundColor Yellow
+
+        & $FlacExe --test "$TempFile"
 
         if ($LASTEXITCODE -ne 0) {
             throw "FLAC integrity test failed."
         }
 
-        # --------------------------------------------------------
-        # 5. Verify block size
-        # --------------------------------------------------------
+        Write-Host "    Integrity test passed." -ForegroundColor Green
 
-        $NewBlockOutput = & $MetaFlacExe `
+        # ----------------------------------------------------
+        # Verify resulting block size
+        # ----------------------------------------------------
+
+        $NewBlockOutput = & $MetaFlac `
             --show-min-blocksize `
             --show-max-blocksize `
             "$TempFile" 2>&1
 
         if ($LASTEXITCODE -ne 0) {
-            throw "Could not read converted FLAC metadata."
+            throw "Could not read converted FLAC block size."
         }
 
         $NewBlockValues = @(
@@ -318,63 +413,147 @@ foreach ($File in $Files) {
         $NewMinBlock = $NewBlockValues[0]
         $NewMaxBlock = $NewBlockValues[1]
 
-        Write-Host "    New block size:     $NewMinBlock / $NewMaxBlock"
+        Write-Host "    New block size: $NewMinBlock / $NewMaxBlock"
 
         if ($NewMaxBlock -gt 4096) {
-            throw "Converted file still exceeds 4096 block size."
+            throw "Converted file still has block size > 4096."
         }
 
-        # --------------------------------------------------------
-        # 6. Replace original
-        # --------------------------------------------------------
+        Write-Host "    Block-size check passed." -ForegroundColor Green
 
-        Write-Host "    Replacing original..." -ForegroundColor Cyan
+        # ----------------------------------------------------
+        # Final safety check
+        #
+        # Make sure original still exists before replacement.
+        # ----------------------------------------------------
+
+        if (!(Test-Path -LiteralPath $File.FullName)) {
+            throw "Original file disappeared before replacement. Aborting."
+        }
+
+        # ----------------------------------------------------
+        # Replace original
+        # ----------------------------------------------------
+
+        Write-Host "    Replacing original..." -ForegroundColor Yellow
 
         Remove-Item `
             -LiteralPath $File.FullName `
-            -Force
+            -Force `
+            -ErrorAction Stop
 
         Rename-Item `
             -LiteralPath $TempFile `
-            -NewName $File.Name
+            -NewName $File.Name `
+            -ErrorAction Stop
 
-        Write-Host "    SUCCESS - original filename preserved" -ForegroundColor Green
+        $TempFile = $null
 
-        $Success++
+        Write-Host "    SUCCESS" -ForegroundColor Green
+
+        $Converted++
+
+        $Results.Add([PSCustomObject]@{
+            File   = $File.FullName
+            Status = "CONVERTED"
+            OldMin = $CurrentMinBlock
+            OldMax = $CurrentMaxBlock
+            NewMin = $NewMinBlock
+            NewMax = $NewMaxBlock
+            Reason = "Successfully converted"
+        })
 
     }
     catch {
 
-        Write-Host "    FAILED: $($_.Exception.Message)" -ForegroundColor Red
+        $Failed++
+        $Reason = $_.Exception.Message
 
-        # Delete failed temporary file
-        if (Test-Path -LiteralPath $TempFile) {
+        Write-Host "    FAILED: $Reason" -ForegroundColor Red
+
+        $Results.Add([PSCustomObject]@{
+            File   = $File.FullName
+            Status = "FAILED"
+            OldMin = $CurrentMinBlock
+            OldMax = $CurrentMaxBlock
+            NewMin = ""
+            NewMax = ""
+            Reason = $Reason
+        })
+
+        # ----------------------------------------------------
+        # Delete temporary file only
+        # NEVER delete original here.
+        # ----------------------------------------------------
+
+        if ($TempFile -and (Test-Path -LiteralPath $TempFile)) {
+
             Remove-Item `
                 -LiteralPath $TempFile `
                 -Force `
                 -ErrorAction SilentlyContinue
-        }
 
-        $Failed++
+            Write-Host "    Temporary file removed." `
+                -ForegroundColor DarkYellow
+        }
     }
 
     Write-Host ""
 }
 
 # ------------------------------------------------------------
-# Summary
+# Save CSV log
 # ------------------------------------------------------------
 
-Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "Finished!" -ForegroundColor Cyan
-Write-Host "============================================" -ForegroundColor Cyan
+try {
+    $Results | Export-Csv `
+        -LiteralPath $LogFile `
+        -NoTypeInformation `
+        -Encoding UTF8
 
-Write-Host "Total files: $Total"
-Write-Host "Converted:   $Success" -ForegroundColor Green
-Write-Host "Skipped:     $Skipped" -ForegroundColor Yellow
+    Write-Host "Log saved to:" -ForegroundColor Cyan
+    Write-Host $LogFile
+}
+catch {
+    Write-Host "WARNING: Could not save log file." -ForegroundColor Yellow
+}
+
+# ------------------------------------------------------------
+# Final summary
+# ------------------------------------------------------------
+
+Write-Host ""
+Write-Host "============================================" -ForegroundColor Cyan
+Write-Host "COMPLETE" -ForegroundColor Cyan
+Write-Host "============================================"
+Write-Host "Total files: $TotalFiles"
+Write-Host "Converted:   $Converted" -ForegroundColor Green
+Write-Host "Skipped:     $Skipped" -ForegroundColor DarkGray
 Write-Host "Failed:      $Failed" -ForegroundColor Red
+Write-Host "============================================"
 
-Write-Host "============================================" -ForegroundColor Cyan
+if ($Failed -gt 0) {
+
+    Write-Host ""
+    Write-Host "FAILED FILES:" -ForegroundColor Red
+
+    $Results |
+        Where-Object { $_.Status -eq "FAILED" } |
+        ForEach-Object {
+            Write-Host "  $($_.File)" -ForegroundColor Red
+            Write-Host "    $($_.Reason)" -ForegroundColor DarkRed
+        }
+
+    Write-Host ""
+    Write-Host "The failed files were NOT replaced." -ForegroundColor Yellow
+    Write-Host "See the CSV log for details."
+}
+else {
+    Write-Host ""
+    Write-Host "All files are either compatible or were successfully converted." `
+        -ForegroundColor Green
+}
+
 
 ```
 
