@@ -625,7 +625,7 @@ Update the mapping table as needed.
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
-$MusicPath = "C:\Users\ProudCatOwner\Music"
+$MusicPath = "C:\Users\example\Music"
 
 # 2. Define the Mapping
 $GenreMap = @{
@@ -688,7 +688,7 @@ using Deezer , iTunes and MusicBrainz
 
 ```powershell
 # 1. Configuration
-$MusicPath = "C:\Users\ProudCatOwner\Music"
+$MusicPath = "C:\Users\example\Music"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 Write-Host "--- DEFINITIVE MULTI-DATABASE GENRE FETCHING ---" -ForegroundColor Cyan
