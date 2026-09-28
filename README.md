@@ -156,6 +156,8 @@ ffmpeg -i $f -vn -c:a flac -compression_level 5 `
 Why this is needed
 High-res FLAC files often use large internal block sizes. Hardware players can fail to play these if a block exceeds their internal buffer. Forcing a 4096 (4k) block size ensures the hardware can digest the data stream without losing quality.
 
+Once you have run the script you might see some files that have been skipped. Those are already on or under 4k block size thus u get a temp file named ".__ECHO_MINI_REBLOCK" to whcih u can safely delete since the original file was never touched.
+
 ```powershell
 $ParentFolder = "C:\Users\example\Music"
 
