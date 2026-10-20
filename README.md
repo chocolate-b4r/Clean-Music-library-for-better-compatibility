@@ -143,10 +143,14 @@ Use this command when a file refuses to play or convert due to damaged embedded 
 > **Warning:** This process removes embedded artwork and re-encodes the audio to FLAC.
 
 ```powershell
-$f = "C:\Users\example\Music\x_x\Juice WRLD - moonlight.m4a"
+$f = "C:\Users\Example\Downloads\specific-song.m4a"
+$o = [System.IO.Path]::ChangeExtension($f, ".flac")
 
-ffmpeg -i $f -vn -c:a flac -compression_level 5 `
-    ([System.IO.Path]::ChangeExtension($f, ".flac")) -y
+ffmpeg -i $f -map 0:a:0 -map 0:v? -map_metadata 0 `
+  -c:a flac -compression_level 5 -block_size 4096 `
+  -c:v copy -disposition:v:0 attached_pic "$o" -y
+
+metaflac --show-min-blocksize --show-max-blocksize "$o"
 ```
 
 ---
